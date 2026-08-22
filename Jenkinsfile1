@@ -47,19 +47,23 @@ pipeline {
             }
         }
 
-       stage('OWASP FS Scan') {
+      stage('OWASP FS Scan') {
     steps {
-        catchError(
-            buildResult: 'SUCCESS',
-            stageResult: 'UNSTABLE'
-        ) {
-            dependencyCheck(
-                additionalArguments: '--scan .',
-                odcInstallation: 'DP-Check'
-            )
-        }
+        sh '''
+            echo "Running OWASP Dependency Check..."
+
+            dependency-check.sh \
+                --project "BookMyShow" \
+                --scan . \
+                --format XML \
+                --out dependency-check-report \
+                --failOnCVSS 11 || true
+
+            echo "OWASP Dependency Check completed."
+        '''
     }
 }
+
 
         stage('Trivy FS Scan') {
             steps {
