@@ -2,8 +2,13 @@ pipeline {
     agent any
 
     tools {
-        jdk 'JDK17'
         nodejs 'node23'
+    }
+
+    environment {
+        DOCKER_IMAGE = 'rekhadeepa/bms:latest'
+        CONTAINER_NAME = 'bms'
+        APP_DIR = 'bookmyshow-app'
     }
 
     stages {
@@ -16,58 +21,102 @@ pipeline {
 
         stage('Checkout from Git') {
             steps {
-                git(
-                    branch: 'main',
-                    url: 'https://github.com/KastroVKiran/Book-My-Show.git'
-                )
+                git branch: 'main',
+                    url: 'https://github.com/Rekha-ops-devops/Book-My-Show.git'
 
-                sh 'ls -la'
+                sh '''
+                    echo "========== Workspace =========="
+                    pwd
+                    ls -la
+
+                    echo "========== Application =========="
+                    ls -la bookmyshow-app
+
+                    echo "Checking package files..."
+                    test -f bookmyshow-app/package.json
+                    test -f bookmyshow-app/package-lock.json
+
+                    echo "Checkout successful."
+                '''
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh '''
-                    cd bookmyshow-app
+                dir("${APP_DIR}") {
+                    sh '''
+                        echo "========== Installing Dependencies =========="
 
-                    echo "Checking application files..."
-                    ls -la
+                        node --version
+                        npm --version
 
-                    if [ -f package.json ]; then
+                        if [ ! -f package.json ]; then
+                            echo "ERROR: package.json not found!"
+                            exit 1
+                        fi
+
+                        if [ ! -f package-lock.json ]; then
+                            echo "ERROR: package-lock.json not found!"
+                            exit 1
+                        fi
+
+                        echo "Removing old node_modules..."
+                        rm -rf node_modules
+
                         echo "Installing dependencies..."
+                        npm ci --legacy-peer-deps
 
-                        rm -rf node_modules package-lock.json
-
-                        npm install
-                    else
-                        echo "ERROR: package.json not found in bookmyshow-app!"
-                        exit 1
-                    fi
-                '''
+                        echo "Dependencies installed successfully."
+                    '''
+                }
             }
         }
 
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck(
-                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
-                    odcInstallation: 'DP-Check'
-                )
+                withCredentials([
+                    string(
+                        credentialsId: 'nvd-api-key',
+                        variable: 'NVD_API_KEY'
+                    )
+                ]) {
+                    catchError(
+                        buildResult: 'UNSTABLE',
+                        stageResult: 'UNSTABLE'
+                    ) {
+                        dependencyCheck(
+                            odcInstallation: 'DP-Check',
+                            additionalArguments: "--scan ./ --disableYarnAudit --disableNodeAudit --nvdApiKey ${NVD_API_KEY}"
+                        )
+                    }
+                }
+            }
 
-                dependencyCheckPublisher(
-                    pattern: '**/dependency-check-report.xml'
-                )
+            post {
+                always {
+                    dependencyCheckPublisher(
+                        pattern: '**/dependency-check-report.xml',
+                        stopBuild: false
+                    )
+                }
             }
         }
 
         stage('Trivy FS Scan') {
             steps {
                 sh '''
-                    echo "Running Trivy filesystem scan..."
+                    echo "========== Trivy Filesystem Scan =========="
 
-                    trivy fs . > trivyfs.txt
+                    trivy fs . \
+                        --scanners vuln,secret \
+                        --format table \
+                        -o trivyfs.txt \
+                        .
 
-                    echo "Trivy scan completed."
+                    echo "Trivy filesystem scan completed."
+
+                    echo "========== Trivy Report =========="
+                    cat trivyfs.txt
                 '''
             }
         }
@@ -80,17 +129,19 @@ pipeline {
                         toolName: 'docker'
                     ) {
                         sh '''
-                            echo "Building Docker image..."
+                            echo "========== Docker Build =========="
 
                             docker build \
                                 --no-cache \
-                                -t rekhadeepa/bms:latest \
-                                -f bookmyshow-app/Dockerfile \
-                                bookmyshow-app
+                                -t ${DOCKER_IMAGE} \
+                                -f ${APP_DIR}/Dockerfile \
+                                ${APP_DIR}
 
-                            echo "Pushing Docker image to registry..."
+                            echo "Docker image built successfully."
 
-                            docker push rekhadeepa/bms:latest
+                            echo "========== Docker Push =========="
+
+                            docker push ${DOCKER_IMAGE}
 
                             echo "Docker image pushed successfully."
                         '''
@@ -102,65 +153,112 @@ pipeline {
         stage('Deploy to Container') {
             steps {
                 sh '''
-                    echo "Stopping and removing old container..."
+                    echo "========== Deploying Application =========="
 
-                    docker stop bms || true
-                    docker rm bms || true
+                    echo "Stopping old container..."
+                    docker stop ${CONTAINER_NAME} || true
 
-                    echo "Pulling latest image..."
+                    echo "Removing old container..."
+                    docker rm ${CONTAINER_NAME} || true
 
-                    docker pull rekhadeepa/bms:latest
+                    echo "Pulling latest Docker image..."
+                    docker pull ${DOCKER_IMAGE}
 
-                    echo "Running new container..."
-
+                    echo "Starting new container..."
                     docker run -d \
                         --restart=always \
-                        --name bms \
+                        --name ${CONTAINER_NAME} \
                         -p 3000:3000 \
-                        rekhadeepa/bms:latest
+                        ${DOCKER_IMAGE}
 
-                    echo "Waiting for application..."
+                    echo "Waiting for application to start..."
+                    sleep 15
 
-                    sleep 10
-
-                    echo "Checking container..."
-
+                    echo "========== Container Status =========="
                     docker ps -a
 
-                    echo "Checking container status..."
+                    echo "========== Checking Container =========="
 
-                    if [ "$(docker inspect -f '{{.State.Running}}' bms)" != "true" ]; then
-                        echo "ERROR: Container is not running"
-
-                        docker logs bms
-
+                    if [ "$(docker inspect -f '{{.State.Running}}' ${CONTAINER_NAME})" != "true" ]; then
+                        echo "ERROR: Container is not running!"
+                        docker logs ${CONTAINER_NAME}
                         exit 1
                     fi
 
-                    echo "Container is running successfully!"
+                    echo "Container is running successfully."
 
-                    echo "Application logs:"
+                    echo "========== Application Logs =========="
+                    docker logs --tail 50 ${CONTAINER_NAME}
 
-                    docker logs --tail 50 bms
+                    echo "Application deployed successfully."
                 '''
             }
         }
     }
 
     post {
-        always {
+
+        success {
             emailext(
-                attachLog: true,
-                subject: "${currentBuild.result}",
-                body: """
-                    Project: ${env.JOB_NAME}<br/>
-                    Build Number: ${env.BUILD_NUMBER}<br/>
-                    Build Status: ${currentBuild.result}<br/>
-                    URL: ${env.BUILD_URL}<br/>
-                """,
                 to: 'rekhask977@gmail.com',
-                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    <h3>Build Successful</h3>
+
+                    <p><b>Project:</b> ${env.JOB_NAME}</p>
+                    <p><b>Build Number:</b> ${env.BUILD_NUMBER}</p>
+                    <p><b>Status:</b> SUCCESS</p>
+                    <p><b>Docker Image:</b> ${DOCKER_IMAGE}</p>
+                    <p><b>Application:</b> http://localhost:3000</p>
+                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
+                """,
+                attachLog: true,
+                attachmentsPattern: 'trivyfs.txt'
             )
+        }
+
+        unstable {
+            emailext(
+                to: 'rekhask977@gmail.com',
+                subject: "UNSTABLE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    <h3>Build Unstable</h3>
+
+                    <p><b>Project:</b> ${env.JOB_NAME}</p>
+                    <p><b>Build Number:</b> ${env.BUILD_NUMBER}</p>
+                    <p><b>Status:</b> UNSTABLE</p>
+                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
+
+                    <p>Check the Jenkins console for security scan details.</p>
+                """,
+                attachLog: true,
+                attachmentsPattern: 'trivyfs.txt'
+            )
+        }
+
+        failure {
+            emailext(
+                to: 'rekhask977@gmail.com',
+                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    <h3>Build Failed</h3>
+
+                    <p><b>Project:</b> ${env.JOB_NAME}</p>
+                    <p><b>Build Number:</b> ${env.BUILD_NUMBER}</p>
+                    <p><b>Status:</b> FAILURE</p>
+                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
+
+                    <p>Check the attached Jenkins log for the failure reason.</p>
+                """,
+                attachLog: true,
+                attachmentsPattern: 'trivyfs.txt'
+            )
+        }
+
+        always {
+            echo "========== Pipeline Finished =========="
+            echo "Build: ${env.BUILD_NUMBER}"
+            echo "Result: ${currentBuild.currentResult}"
         }
     }
 }
