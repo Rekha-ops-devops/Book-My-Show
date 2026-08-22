@@ -97,7 +97,7 @@ stage('Deploy to Container') {
     }
 }
     post {
-        always {
+        always (
             emailext attachLog: true,
                 subject: "'${currentBuild.result}'",
                 body: "Project: ${env.JOB_NAME}<br/>" +
@@ -105,6 +105,7 @@ stage('Deploy to Container') {
                       "URL: ${env.BUILD_URL}<br/>",
                 to: 'rekhask977@gmail.com',
                 attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
-        }
+        )
     }
+}
 }
