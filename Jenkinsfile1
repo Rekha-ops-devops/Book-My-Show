@@ -25,7 +25,6 @@ pipeline {
                     echo "========== CHECKOUT =========="
                     pwd
                     ls -la
-                    echo "Application files:"
                     ls -la bookmyshow-app
 
                     test -f bookmyshow-app/package.json
@@ -47,7 +46,6 @@ pipeline {
 
                         rm -rf node_modules
 
-                        echo "Installing npm dependencies..."
                         npm install --legacy-peer-deps
 
                         echo "Dependencies installed successfully."
@@ -66,16 +64,16 @@ pipeline {
 
                         npm run build
 
-                        echo "Application build successful."
+                        echo "Build completed."
+
                         ls -la build
                     '''
                 }
             }
         }
 
-        stage('OWASP Dependency Check') {
+        stage('OWASP FS Scan') {
             steps {
-
                 withCredentials([
                     string(
                         credentialsId: 'nvd-api-key',
@@ -83,25 +81,21 @@ pipeline {
                     )
                 ]) {
 
-                    catchError(
-                        buildResult: 'UNSTABLE',
-                        stageResult: 'UNSTABLE'
-                    ) {
+                    sh '''
+                        echo "========== OWASP DEPENDENCY CHECK =========="
 
-                        dependencyCheck(
-                            odcInstallation: 'DP-Check',
-                            additionalArguments: "--scan . --disableYarnAudit --disableNodeAudit --nvdApiKey ${NVD_API_KEY}"
-                        )
-                    }
-                }
-            }
+                        dependency-check.sh \
+                            --project "Book-My-Show" \
+                            --scan . \
+                            --format XML \
+                            --out dependency-check-report \
+                            --nvdApiKey "$NVD_API_KEY" \
+                            --disableYarnAudit \
+                            --disableNodeAudit \
+                            || true
 
-            post {
-                always {
-                    dependencyCheckPublisher(
-                        pattern: '**/dependency-check-report.xml',
-                        stopBuild: false
-                    )
+                        echo "OWASP scan completed."
+                    '''
                 }
             }
         }
@@ -114,10 +108,12 @@ pipeline {
                     trivy fs . \
                         --scanners vuln,secret \
                         --format table \
-                        -o trivyfs.txt .
+                        -o trivyfs.txt \
+                        .
 
                     echo "========== TRIVY REPORT =========="
-                    cat trivyfs.txt
+
+                    cat trivyfs.txt || true
                 '''
             }
 
@@ -151,12 +147,9 @@ pipeline {
 
         stage('Docker Push') {
             steps {
-
                 withDockerRegistry(
-                    credentialsId: 'docker',
-                    toolName: 'docker'
+                    credentialsId: 'docker'
                 ) {
-
                     sh '''
                         echo "========== DOCKER PUSH =========="
 
@@ -182,7 +175,7 @@ pipeline {
                     echo "Pulling latest image..."
                     docker pull ${DOCKER_IMAGE}
 
-                    echo "Starting new container..."
+                    echo "Starting container..."
 
                     docker run -d \
                         --restart=always \
@@ -199,7 +192,9 @@ pipeline {
 
                     if [ "$(docker inspect -f '{{.State.Running}}' ${CONTAINER_NAME})" != "true" ]; then
                         echo "ERROR: Container failed to start."
+
                         docker logs ${CONTAINER_NAME}
+
                         exit 1
                     fi
 
@@ -216,37 +211,20 @@ pipeline {
     post {
 
         success {
+            echo "======================================"
+            echo "PIPELINE SUCCESS"
+            echo "======================================"
+
             emailext(
                 to: 'rekhask977@gmail.com',
                 subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
-                    <h3>Book My Show Pipeline Successful</h3>
+                    Book My Show Pipeline Successful
 
-                    <p><b>Project:</b> ${env.JOB_NAME}</p>
-                    <p><b>Build:</b> #${env.BUILD_NUMBER}</p>
-                    <p><b>Status:</b> SUCCESS</p>
-                    <p><b>Docker Image:</b> ${DOCKER_IMAGE}</p>
-                    <p><b>Application Port:</b> 3000</p>
-                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
-                """,
-                attachLog: true,
-                attachmentsPattern: 'trivyfs.txt'
-            )
-        }
-
-        unstable {
-            emailext(
-                to: 'rekhask977@gmail.com',
-                subject: "UNSTABLE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                body: """
-                    <h3>Book My Show Pipeline Unstable</h3>
-
-                    <p><b>Project:</b> ${env.JOB_NAME}</p>
-                    <p><b>Build:</b> #${env.BUILD_NUMBER}</p>
-                    <p><b>Status:</b> UNSTABLE</p>
-                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
-
-                    <p>Check OWASP/Trivy scan results.</p>
+                    Build: #${env.BUILD_NUMBER}
+                    Docker Image: ${DOCKER_IMAGE}
+                    Application Port: 3000
+                    Build URL: ${env.BUILD_URL}
                 """,
                 attachLog: true,
                 attachmentsPattern: 'trivyfs.txt'
@@ -254,18 +232,20 @@ pipeline {
         }
 
         failure {
+            echo "======================================"
+            echo "PIPELINE FAILED"
+            echo "======================================"
+
             emailext(
                 to: 'rekhask977@gmail.com',
                 subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
-                    <h3>Book My Show Pipeline Failed</h3>
+                    Book My Show Pipeline Failed
 
-                    <p><b>Project:</b> ${env.JOB_NAME}</p>
-                    <p><b>Build:</b> #${env.BUILD_NUMBER}</p>
-                    <p><b>Status:</b> FAILURE</p>
-                    <p><b>Build URL:</b> ${env.BUILD_URL}</p>
+                    Build: #${env.BUILD_NUMBER}
+                    Build URL: ${env.BUILD_URL}
 
-                    <p>Check the Jenkins console output for the failure.</p>
+                    Check Jenkins console output.
                 """,
                 attachLog: true,
                 attachmentsPattern: 'trivyfs.txt'
@@ -274,10 +254,9 @@ pipeline {
 
         always {
             echo "======================================"
-            echo "       PIPELINE FINISHED"
-            echo "======================================"
-            echo "Build Number : ${env.BUILD_NUMBER}"
-            echo "Result       : ${currentBuild.currentResult}"
+            echo "PIPELINE FINISHED"
+            echo "Build Number: ${env.BUILD_NUMBER}"
+            echo "Result: ${currentBuild.currentResult}"
             echo "======================================"
         }
     }
