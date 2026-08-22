@@ -18,7 +18,7 @@ pipeline {
             steps {
                 git(
                     branch: 'main',
-                    url: 'ttps://github.com/Rekha-ops-devops/Book-My-Show.git'
+                    url: 'https://github.com/Rekha-ops-devops/Book-My-Show.git'
                 )
 
                 sh 'ls -la'
