@@ -22,9 +22,14 @@ pipeline {
                     url: 'https://github.com/Rekha-ops-devops/Book-My-Show.git'
 
                 sh '''
-                    echo "========== CHECKOUT =========="
+                    echo "======================================"
+                    echo "CHECKOUT"
+                    echo "======================================"
+
                     pwd
                     ls -la
+
+                    echo "Application:"
                     ls -la bookmyshow-app
 
                     test -f bookmyshow-app/package.json
@@ -39,13 +44,16 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        echo "========== INSTALL DEPENDENCIES =========="
+                        echo "======================================"
+                        echo "INSTALL DEPENDENCIES"
+                        echo "======================================"
 
                         node --version
                         npm --version
 
                         rm -rf node_modules
 
+                        echo "Running npm install..."
                         npm install --legacy-peer-deps
 
                         echo "Dependencies installed successfully."
@@ -58,13 +66,15 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        echo "========== BUILD APPLICATION =========="
+                        echo "======================================"
+                        echo "BUILD APPLICATION"
+                        echo "======================================"
 
                         export NODE_OPTIONS=--openssl-legacy-provider
 
                         npm run build
 
-                        echo "Build completed."
+                        echo "Build successful."
 
                         ls -la build
                     '''
@@ -72,8 +82,9 @@ pipeline {
             }
         }
 
-        stage('OWASP FS Scan') {
+        stage('OWASP Dependency Check') {
             steps {
+
                 withCredentials([
                     string(
                         credentialsId: 'nvd-api-key',
@@ -82,19 +93,29 @@ pipeline {
                 ]) {
 
                     sh '''
-                        echo "========== OWASP DEPENDENCY CHECK =========="
+                        echo "======================================"
+                        echo "OWASP DEPENDENCY CHECK"
+                        echo "======================================"
 
-                        dependency-check.sh \
-                            --project "Book-My-Show" \
-                            --scan . \
-                            --format XML \
-                            --out dependency-check-report \
-                            --nvdApiKey "$NVD_API_KEY" \
-                            --disableYarnAudit \
-                            --disableNodeAudit \
-                            || true
+                        if command -v dependency-check.sh >/dev/null 2>&1
+                        then
+                            echo "Dependency Check found."
 
-                        echo "OWASP scan completed."
+                            dependency-check.sh \
+                                --project "Book-My-Show" \
+                                --scan . \
+                                --format XML \
+                                --out dependency-check-report \
+                                --nvdApiKey "$NVD_API_KEY" \
+                                --disableYarnAudit \
+                                --disableNodeAudit
+
+                        else
+                            echo "WARNING: dependency-check.sh is not installed."
+                            echo "Skipping OWASP scan."
+                        fi
+
+                        echo "OWASP stage completed."
                     '''
                 }
             }
@@ -103,17 +124,31 @@ pipeline {
         stage('Trivy FS Scan') {
             steps {
                 sh '''
-                    echo "========== TRIVY FILESYSTEM SCAN =========="
+                    echo "======================================"
+                    echo "TRIVY FILESYSTEM SCAN"
+                    echo "======================================"
 
-                    trivy fs . \
-                        --scanners vuln,secret \
-                        --format table \
-                        -o trivyfs.txt \
-                        .
+                    if command -v trivy >/dev/null 2>&1
+                    then
 
-                    echo "========== TRIVY REPORT =========="
+                        trivy fs . \
+                            --scanners vuln,secret \
+                            --format table \
+                            -o trivyfs.txt \
+                            .
 
-                    cat trivyfs.txt || true
+                        echo "Trivy scan completed."
+
+                        cat trivyfs.txt
+
+                    else
+
+                        echo "WARNING: Trivy is not installed."
+                        echo "Skipping Trivy scan."
+
+                        echo "Trivy not installed." > trivyfs.txt
+
+                    fi
                 '''
             }
 
@@ -130,7 +165,11 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                    echo "========== DOCKER BUILD =========="
+                    echo "======================================"
+                    echo "DOCKER BUILD"
+                    echo "======================================"
+
+                    docker --version
 
                     docker build \
                         --no-cache \
@@ -140,22 +179,44 @@ pipeline {
 
                     echo "Docker image built successfully."
 
-                    docker images | grep bms || true
+                    docker images | grep rekhadeepa || true
                 '''
             }
         }
 
-        stage('Docker Push') {
+        stage('Docker Login & Push') {
             steps {
-                withDockerRegistry(
-                    credentialsId: 'docker'
-                ) {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+
                     sh '''
-                        echo "========== DOCKER PUSH =========="
+                        echo "======================================"
+                        echo "DOCKER LOGIN"
+                        echo "======================================"
+
+                        set +x
+
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            --username "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        echo "Docker login successful."
+
+                        echo "======================================"
+                        echo "DOCKER PUSH"
+                        echo "======================================"
 
                         docker push ${DOCKER_IMAGE}
 
                         echo "Docker image pushed successfully."
+
+                        docker logout
                     '''
                 }
             }
@@ -164,18 +225,23 @@ pipeline {
         stage('Deploy Container') {
             steps {
                 sh '''
-                    echo "========== DEPLOY CONTAINER =========="
+                    echo "======================================"
+                    echo "DEPLOY CONTAINER"
+                    echo "======================================"
 
-                    echo "Stopping old container..."
+                    echo "Stopping existing container..."
+
                     docker stop ${CONTAINER_NAME} || true
 
-                    echo "Removing old container..."
+                    echo "Removing existing container..."
+
                     docker rm ${CONTAINER_NAME} || true
 
-                    echo "Pulling latest image..."
+                    echo "Pulling latest Docker image..."
+
                     docker pull ${DOCKER_IMAGE}
 
-                    echo "Starting container..."
+                    echo "Starting new container..."
 
                     docker run -d \
                         --restart=always \
@@ -184,23 +250,35 @@ pipeline {
                         ${DOCKER_IMAGE}
 
                     echo "Waiting for application..."
+
                     sleep 15
 
-                    echo "========== CONTAINER STATUS =========="
+                    echo "======================================"
+                    echo "CONTAINER STATUS"
+                    echo "======================================"
 
                     docker ps -a
 
-                    if [ "$(docker inspect -f '{{.State.Running}}' ${CONTAINER_NAME})" != "true" ]; then
-                        echo "ERROR: Container failed to start."
+                    echo "======================================"
+                    echo "CHECKING CONTAINER"
+                    echo "======================================"
+
+                    if [ "$(docker inspect -f '{{.State.Running}}' ${CONTAINER_NAME})" != "true" ]
+                    then
+
+                        echo "ERROR: Container is not running."
 
                         docker logs ${CONTAINER_NAME}
 
                         exit 1
+
                     fi
 
                     echo "Container is running successfully."
 
-                    echo "========== APPLICATION LOGS =========="
+                    echo "======================================"
+                    echo "APPLICATION LOGS"
+                    echo "======================================"
 
                     docker logs --tail 50 ${CONTAINER_NAME}
                 '''
@@ -211,6 +289,7 @@ pipeline {
     post {
 
         success {
+
             echo "======================================"
             echo "PIPELINE SUCCESS"
             echo "======================================"
@@ -219,12 +298,15 @@ pipeline {
                 to: 'rekhask977@gmail.com',
                 subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
-                    Book My Show Pipeline Successful
+Book My Show Pipeline Successful
 
-                    Build: #${env.BUILD_NUMBER}
-                    Docker Image: ${DOCKER_IMAGE}
-                    Application Port: 3000
-                    Build URL: ${env.BUILD_URL}
+Build Number : ${env.BUILD_NUMBER}
+Docker Image : ${DOCKER_IMAGE}
+Container    : ${CONTAINER_NAME}
+Port         : 3000
+
+Build URL:
+${env.BUILD_URL}
                 """,
                 attachLog: true,
                 attachmentsPattern: 'trivyfs.txt'
@@ -232,6 +314,7 @@ pipeline {
         }
 
         failure {
+
             echo "======================================"
             echo "PIPELINE FAILED"
             echo "======================================"
@@ -240,12 +323,14 @@ pipeline {
                 to: 'rekhask977@gmail.com',
                 subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 body: """
-                    Book My Show Pipeline Failed
+Book My Show Pipeline Failed
 
-                    Build: #${env.BUILD_NUMBER}
-                    Build URL: ${env.BUILD_URL}
+Build Number : ${env.BUILD_NUMBER}
 
-                    Check Jenkins console output.
+Build URL:
+${env.BUILD_URL}
+
+Please check Jenkins Console Output.
                 """,
                 attachLog: true,
                 attachmentsPattern: 'trivyfs.txt'
@@ -253,10 +338,14 @@ pipeline {
         }
 
         always {
+
             echo "======================================"
             echo "PIPELINE FINISHED"
-            echo "Build Number: ${env.BUILD_NUMBER}"
-            echo "Result: ${currentBuild.currentResult}"
+            echo "======================================"
+
+            echo "Build Number : ${env.BUILD_NUMBER}"
+            echo "Result       : ${currentBuild.currentResult}"
+
             echo "======================================"
         }
     }
