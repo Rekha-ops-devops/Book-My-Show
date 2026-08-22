@@ -1,325 +1,166 @@
 pipeline {
-
     agent any
 
-    environment {
-        APP_DIR = 'bookmyshow-app'
-        IMAGE_NAME = 'rekha/bookmyshow'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-
-        // CHANGE THESE ONLY IF YOUR JENKINS CREDENTIAL ID IS DIFFERENT
-        DOCKER_CREDENTIALS = 'dockerhub-credentials'
-
-        // NVD API credential ID you already created in Jenkins
-        NVD_CREDENTIALS = 'nvd-api-key'
+    tools {
+        jdk 'JDK17'
+        nodejs 'node23'
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Clean Workspace') {
             steps {
-                echo '======================================'
-                echo 'CHECKOUT SOURCE CODE'
-                echo '======================================'
-
-                checkout scm
-
-                sh '''
-                    echo "Workspace:"
-                    pwd
-
-                    echo "Repository:"
-                    ls -la
-
-                    echo "Application:"
-                    ls -la bookmyshow-app
-
-                    test -f bookmyshow-app/package.json
-                    test -f bookmyshow-app/Dockerfile
-
-                    echo "Checkout successful."
-                '''
+                cleanWs()
             }
         }
 
-
-        stage('Check Tools') {
+        stage('Checkout from Git') {
             steps {
-                sh '''
-                    echo "======================================"
-                    echo "CHECKING REQUIRED TOOLS"
-                    echo "======================================"
+                git(
+                    branch: 'main',
+                    url: 'https://github.com/KastroVKiran/Book-My-Show.git'
+                )
 
-                    echo "Node:"
-                    if command -v node >/dev/null 2>&1; then
-                        node --version
-                    else
-                        echo "ERROR: Node.js is not installed on Jenkins agent."
-                        exit 1
-                    fi
-
-                    echo "NPM:"
-                    if command -v npm >/dev/null 2>&1; then
-                        npm --version
-                    else
-                        echo "ERROR: npm is not installed on Jenkins agent."
-                        exit 1
-                    fi
-
-                    echo "Docker:"
-                    if command -v docker >/dev/null 2>&1; then
-                        docker --version
-                    else
-                        echo "ERROR: Docker is not installed on Jenkins agent."
-                        exit 1
-                    fi
-
-                    echo "Trivy:"
-                    if command -v trivy >/dev/null 2>&1; then
-                        trivy --version
-                    else
-                        echo "WARNING: Trivy is not installed."
-                    fi
-
-                    echo "Required tool check completed."
-                '''
+                sh 'ls -la'
             }
         }
-
 
         stage('Install Dependencies') {
             steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        echo "======================================"
-                        echo "INSTALL DEPENDENCIES"
-                        echo "======================================"
-
-                        node --version
-                        npm --version
-
-                        rm -rf node_modules
-
-                        echo "Installing npm dependencies..."
-
-                        # npm ci fails because the existing package-lock.json
-                        # does not match package.json.
-                        npm install --legacy-peer-deps
-
-                        echo "Dependencies installed successfully."
-                    '''
-                }
-            }
-        }
-
-
-        stage('Build Application') {
-            steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        echo "======================================"
-                        echo "BUILD APPLICATION"
-                        echo "======================================"
-
-                        npm run build
-
-                        echo "Application build completed."
-                    '''
-                }
-            }
-        }
-
-
-        stage('OWASP Dependency Check') {
-            steps {
                 sh '''
-                    echo "======================================"
-                    echo "OWASP DEPENDENCY CHECK"
-                    echo "======================================"
+                    cd bookmyshow-app
 
-                    if command -v dependency-check.sh >/dev/null 2>&1; then
+                    echo "Checking application files..."
+                    ls -la
 
-                        dependency-check.sh \
-                            --project "Book-My-Show" \
-                            --scan "${APP_DIR}" \
-                            --format HTML \
-                            --out dependency-check-report \
-                            --failOnCVSS 11
+                    if [ -f package.json ]; then
+                        echo "Installing dependencies..."
 
+                        rm -rf node_modules package-lock.json
+
+                        npm install
                     else
-                        echo "OWASP Dependency-Check is not installed."
-                        echo "Skipping this stage."
+                        echo "ERROR: package.json not found in bookmyshow-app!"
+                        exit 1
                     fi
-
-                    echo "OWASP stage completed."
                 '''
             }
         }
 
-
-        stage('NVD Vulnerability Scan') {
+        stage('OWASP FS Scan') {
             steps {
-                withCredentials([
-                    string(
-                        credentialsId: "${NVD_CREDENTIALS}",
-                        variable: 'NVD_API_KEY'
-                    )
-                ]) {
-                    sh '''
-                        echo "======================================"
-                        echo "NVD VULNERABILITY SCAN"
-                        echo "======================================"
+                dependencyCheck(
+                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
+                    odcInstallation: 'DP-Check'
+                )
 
-                        if command -v dependency-check.sh >/dev/null 2>&1; then
-
-                            echo "Running Dependency Check with NVD API key..."
-
-                            dependency-check.sh \
-                                --project "Book-My-Show" \
-                                --scan "${APP_DIR}" \
-                                --format HTML \
-                                --out nvd-report \
-                                --nvdApiKey "${NVD_API_KEY}" \
-                                --failOnCVSS 11
-
-                        else
-                            echo "dependency-check.sh not installed."
-                            echo "Skipping NVD scan."
-                        fi
-
-                        echo "NVD stage completed."
-                    '''
-                }
+                dependencyCheckPublisher(
+                    pattern: '**/dependency-check-report.xml'
+                )
             }
         }
-
 
         stage('Trivy FS Scan') {
             steps {
                 sh '''
-                    echo "======================================"
-                    echo "TRIVY FILESYSTEM SCAN"
-                    echo "======================================"
+                    echo "Running Trivy filesystem scan..."
 
-                    if command -v trivy >/dev/null 2>&1; then
+                    trivy fs . > trivyfs.txt
 
-                        trivy fs \
-                            --scanners vuln,secret \
-                            --severity HIGH,CRITICAL \
-                            --exit-code 0 \
-                            "${APP_DIR}"
-
-                    else
-                        echo "Trivy is not installed."
-                        echo "Skipping Trivy filesystem scan."
-                    fi
-
-                    echo "Trivy filesystem stage completed."
+                    echo "Trivy scan completed."
                 '''
             }
         }
 
-
-        stage('Docker Build') {
+        stage('Docker Build & Push') {
             steps {
-                sh '''
-                    echo "======================================"
-                    echo "DOCKER BUILD"
-                    echo "======================================"
+                script {
+                    withDockerRegistry(
+                        credentialsId: 'docker',
+                        toolName: 'docker'
+                    ) {
+                        sh '''
+                            echo "Building Docker image..."
 
-                    docker build \
-                        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
-                        -t "${IMAGE_NAME}:latest" \
-                        "${APP_DIR}"
+                            docker build \
+                                --no-cache \
+                                -t rekhadeepa/bms:latest \
+                                -f bookmyshow-app/Dockerfile \
+                                bookmyshow-app
 
-                    echo "Docker image created."
+                            echo "Pushing Docker image to registry..."
 
-                    docker images | grep "${IMAGE_NAME}" || true
-                '''
-            }
-        }
+                            docker push rekhadeepa/bms:latest
 
-
-        stage('Docker Login & Push') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: "${DOCKER_CREDENTIALS}",
-                        usernameVariable: 'DOCKER_USERNAME',
-                        passwordVariable: 'DOCKER_PASSWORD'
-                    )
-                ]) {
-                    sh '''
-                        echo "======================================"
-                        echo "DOCKER LOGIN & PUSH"
-                        echo "======================================"
-
-                        echo "${DOCKER_PASSWORD}" | docker login \
-                            -u "${DOCKER_USERNAME}" \
-                            --password-stdin
-
-                        docker push "${IMAGE_NAME}:${IMAGE_TAG}"
-                        docker push "${IMAGE_NAME}:latest"
-
-                        docker logout
-
-                        echo "Docker image pushed successfully."
-                    '''
+                            echo "Docker image pushed successfully."
+                        '''
+                    }
                 }
             }
         }
 
-
-        stage('Deploy Container') {
+        stage('Deploy to Container') {
             steps {
                 sh '''
-                    echo "======================================"
-                    echo "DEPLOY CONTAINER"
-                    echo "======================================"
+                    echo "Stopping and removing old container..."
 
-                    docker rm -f bookmyshow-container 2>/dev/null || true
+                    docker stop bms || true
+                    docker rm bms || true
+
+                    echo "Pulling latest image..."
+
+                    docker pull rekhadeepa/bms:latest
+
+                    echo "Running new container..."
 
                     docker run -d \
-                        --name bookmyshow-container \
+                        --restart=always \
+                        --name bms \
                         -p 3000:3000 \
-                        "${IMAGE_NAME}:latest"
+                        rekhadeepa/bms:latest
 
-                    echo "Container started."
+                    echo "Waiting for application..."
 
-                    sleep 5
+                    sleep 10
 
-                    docker ps --filter "name=bookmyshow-container"
+                    echo "Checking container..."
 
-                    echo "Deployment completed."
+                    docker ps -a
+
+                    echo "Checking container status..."
+
+                    if [ "$(docker inspect -f '{{.State.Running}}' bms)" != "true" ]; then
+                        echo "ERROR: Container is not running"
+
+                        docker logs bms
+
+                        exit 1
+                    fi
+
+                    echo "Container is running successfully!"
+
+                    echo "Application logs:"
+
+                    docker logs --tail 50 bms
                 '''
             }
         }
-
     }
 
-
     post {
-
-        success {
-            echo '======================================'
-            echo 'PIPELINE SUCCESS'
-            echo '======================================'
-            echo "Build Number : ${BUILD_NUMBER}"
-            echo "Result       : SUCCESS"
-            echo '======================================'
-        }
-
-        failure {
-            echo '======================================'
-            echo 'PIPELINE FAILED'
-            echo '======================================'
-            echo "Build Number : ${BUILD_NUMBER}"
-            echo "Result       : FAILURE"
-            echo '======================================'
-        }
-
         always {
-            echo 'Pipeline completed.'
+            emailext(
+                attachLog: true,
+                subject: "${currentBuild.result}",
+                body: """
+                    Project: ${env.JOB_NAME}<br/>
+                    Build Number: ${env.BUILD_NUMBER}<br/>
+                    Build Status: ${currentBuild.result}<br/>
+                    URL: ${env.BUILD_URL}<br/>
+                """,
+                to: 'rekhask977@gmail.com',
+                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+            )
         }
     }
 }
