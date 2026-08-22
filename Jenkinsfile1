@@ -1,111 +1,166 @@
 pipeline {
     agent any
+
     tools {
         jdk 'JDK17'
         nodejs 'node23'
     }
+
     stages {
+
         stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
+
         stage('Checkout from Git') {
             steps {
-                git branch: 'main', url: 'https://github.com/KastroVKiran/Book-My-Show.git'
-                sh 'ls -la'  // Verify files after checkout
+                git(
+                    branch: 'main',
+                    url: 'https://github.com/KastroVKiran/Book-My-Show.git'
+                )
+
+                sh 'ls -la'
             }
         }
-    
+
         stage('Install Dependencies') {
             steps {
                 sh '''
-                cd bookmyshow-app
-                ls -la  # Verify package.json exists
-                if [ -f package.json ]; then
-                    rm -rf node_modules package-lock.json  # Remove old dependencies
-                    npm install  # Install fresh dependencies
-                else
-                    echo "Error: package.json not found in bookmyshow-app!"
-                    exit 1
-                fi
+                    cd bookmyshow-app
+
+                    echo "Checking application files..."
+                    ls -la
+
+                    if [ -f package.json ]; then
+                        echo "Installing dependencies..."
+
+                        rm -rf node_modules package-lock.json
+
+                        npm install
+                    else
+                        echo "ERROR: package.json not found in bookmyshow-app!"
+                        exit 1
+                    fi
                 '''
             }
         }
+
         stage('OWASP FS Scan') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                dependencyCheck(
+                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
+                    odcInstallation: 'DP-Check'
+                )
+
+                dependencyCheckPublisher(
+                    pattern: '**/dependency-check-report.xml'
+                )
             }
         }
+
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt'
+                sh '''
+                    echo "Running Trivy filesystem scan..."
+
+                    trivy fs . > trivyfs.txt
+
+                    echo "Trivy scan completed."
+                '''
             }
         }
+
         stage('Docker Build & Push') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-                        sh ''' 
-                        echo "Building Docker image..."
-                        docker build --no-cache -t rekhadeepa/bms:latest -f bookmyshow-app/Dockerfile bookmyshow-app
+                    withDockerRegistry(
+                        credentialsId: 'docker',
+                        toolName: 'docker'
+                    ) {
+                        sh '''
+                            echo "Building Docker image..."
 
-                        echo "Pushing Docker image to registry..."
-                        docker push rekhadeepa/bms:latest
+                            docker build \
+                                --no-cache \
+                                -t rekhadeepa/bms:latest \
+                                -f bookmyshow-app/Dockerfile \
+                                bookmyshow-app
+
+                            echo "Pushing Docker image to registry..."
+
+                            docker push rekhadeepa/bms:latest
+
+                            echo "Docker image pushed successfully."
                         '''
                     }
                 }
             }
         }
-stage('Deploy to Container') {
-    steps {
-        sh '''
-            echo "Stopping and removing old container..."
 
-            docker stop bms || true
-            docker rm bms || true
+        stage('Deploy to Container') {
+            steps {
+                sh '''
+                    echo "Stopping and removing old container..."
 
-            echo "Pulling latest image..."
-            docker pull rekhadeepa/bms:latest
+                    docker stop bms || true
+                    docker rm bms || true
 
-            echo "Running new container..."
-            docker run -d \
-                --restart=always \
-                --name bms \
-                -p 3000:3000 \
-                rekhadeepa/bms:latest
+                    echo "Pulling latest image..."
 
-            echo "Waiting for application..."
-            sleep 10
+                    docker pull rekhadeepa/bms:latest
 
-            echo "Checking container..."
-            docker ps -a
+                    echo "Running new container..."
 
-            echo "Checking container status..."
-            if [ "$(docker inspect -f '{{.State.Running}}' bms)" != "true" ]; then
-                echo "ERROR: Container is not running"
-                docker logs bms
-                exit 1
-            fi
+                    docker run -d \
+                        --restart=always \
+                        --name bms \
+                        -p 3000:3000 \
+                        rekhadeepa/bms:latest
 
-            echo "Container is running successfully!"
+                    echo "Waiting for application..."
 
-            echo "Application logs:"
-            docker logs --tail 50 bms
-        '''
+                    sleep 10
+
+                    echo "Checking container..."
+
+                    docker ps -a
+
+                    echo "Checking container status..."
+
+                    if [ "$(docker inspect -f '{{.State.Running}}' bms)" != "true" ]; then
+                        echo "ERROR: Container is not running"
+
+                        docker logs bms
+
+                        exit 1
+                    fi
+
+                    echo "Container is running successfully!"
+
+                    echo "Application logs:"
+
+                    docker logs --tail 50 bms
+                '''
+            }
+        }
     }
-}
+
     post {
-        always (
-            emailext attachLog: true,
-                subject: "'${currentBuild.result}'",
-                body: "Project: ${env.JOB_NAME}<br/>" +
-                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
-                      "URL: ${env.BUILD_URL}<br/>",
+        always {
+            emailext(
+                attachLog: true,
+                subject: "${currentBuild.result}",
+                body: """
+                    Project: ${env.JOB_NAME}<br/>
+                    Build Number: ${env.BUILD_NUMBER}<br/>
+                    Build Status: ${currentBuild.result}<br/>
+                    URL: ${env.BUILD_URL}<br/>
+                """,
                 to: 'rekhask977@gmail.com',
                 attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
-        )
+            )
+        }
     }
-}
 }
