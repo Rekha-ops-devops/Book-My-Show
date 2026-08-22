@@ -58,26 +58,44 @@ pipeline {
                 }
             }
         }
-        stage('Deploy to Container') {
-            steps {
-                sh ''' 
-                echo "Stopping and removing old container..."
-                docker stop bms || true
-                docker rm bms || true
+stage('Deploy to Container') {
+    steps {
+        sh '''
+            echo "Stopping and removing old container..."
 
-                echo "Running new container on port 3000..."
-                docker run -d --restart=always --name bms -p 3000:3000 rekhadeepa/bms:latest
+            docker stop bms || true
+            docker rm bms || true
 
-                echo "Checking running containers..."
-                docker ps -a
+            echo "Pulling latest image..."
+            docker pull rekhadeepa/bms:latest
 
-                echo "Fetching logs..."
-                sleep 5  # Give time for the app to start
+            echo "Running new container..."
+            docker run -d \
+                --restart=always \
+                --name bms \
+                -p 3000:3000 \
+                rekhadeepa/bms:latest
+
+            echo "Waiting for application..."
+            sleep 10
+
+            echo "Checking container..."
+            docker ps -a
+
+            echo "Checking container status..."
+            if [ "$(docker inspect -f '{{.State.Running}}' bms)" != "true" ]; then
+                echo "ERROR: Container is not running"
                 docker logs bms
-                '''
-            }
-        }
+                exit 1
+            fi
+
+            echo "Container is running successfully!"
+
+            echo "Application logs:"
+            docker logs --tail 50 bms
+        '''
     }
+}
     post {
         always {
             emailext attachLog: true,
