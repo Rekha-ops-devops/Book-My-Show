@@ -4,9 +4,14 @@ pipeline {
 
     environment {
         APP_DIR = 'bookmyshow-app'
-        IMAGE_NAME = 'bookmyshow'
-        DOCKER_CREDENTIAL_ID = 'dockerhub-credentials'
-        NVD_CREDENTIAL_ID = 'nvd-api-key'
+        IMAGE_NAME = 'rekha/bookmyshow'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        // CHANGE THESE ONLY IF YOUR JENKINS CREDENTIAL ID IS DIFFERENT
+        DOCKER_CREDENTIALS = 'dockerhub-credentials'
+
+        // NVD API credential ID you already created in Jenkins
+        NVD_CREDENTIALS = 'nvd-api-key'
     }
 
     stages {
@@ -23,10 +28,10 @@ pipeline {
                     echo "Workspace:"
                     pwd
 
-                    echo "Repository files:"
+                    echo "Repository:"
                     ls -la
 
-                    echo "Application files:"
+                    echo "Application:"
                     ls -la bookmyshow-app
 
                     test -f bookmyshow-app/package.json
@@ -38,32 +43,71 @@ pipeline {
         }
 
 
+        stage('Check Tools') {
+            steps {
+                sh '''
+                    echo "======================================"
+                    echo "CHECKING REQUIRED TOOLS"
+                    echo "======================================"
+
+                    echo "Node:"
+                    if command -v node >/dev/null 2>&1; then
+                        node --version
+                    else
+                        echo "ERROR: Node.js is not installed on Jenkins agent."
+                        exit 1
+                    fi
+
+                    echo "NPM:"
+                    if command -v npm >/dev/null 2>&1; then
+                        npm --version
+                    else
+                        echo "ERROR: npm is not installed on Jenkins agent."
+                        exit 1
+                    fi
+
+                    echo "Docker:"
+                    if command -v docker >/dev/null 2>&1; then
+                        docker --version
+                    else
+                        echo "ERROR: Docker is not installed on Jenkins agent."
+                        exit 1
+                    fi
+
+                    echo "Trivy:"
+                    if command -v trivy >/dev/null 2>&1; then
+                        trivy --version
+                    else
+                        echo "WARNING: Trivy is not installed."
+                    fi
+
+                    echo "Required tool check completed."
+                '''
+            }
+        }
+
+
         stage('Install Dependencies') {
             steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        echo "======================================"
+                        echo "INSTALL DEPENDENCIES"
+                        echo "======================================"
 
-                nodejs(nodeJSInstallationName: 'NodeJS') {
+                        node --version
+                        npm --version
 
-                    dir("${APP_DIR}") {
+                        rm -rf node_modules
 
-                        sh '''
-                            echo '======================================'
-                            echo 'NODE / NPM VERSION'
-                            echo '======================================'
+                        echo "Installing npm dependencies..."
 
-                            node --version
-                            npm --version
+                        # npm ci fails because the existing package-lock.json
+                        # does not match package.json.
+                        npm install --legacy-peer-deps
 
-                            echo '======================================'
-                            echo 'INSTALLING DEPENDENCIES'
-                            echo '======================================'
-
-                            rm -rf node_modules
-
-                            npm install --legacy-peer-deps
-
-                            echo "Dependencies installed successfully."
-                        '''
-                    }
+                        echo "Dependencies installed successfully."
+                    '''
                 }
             }
         }
@@ -71,21 +115,16 @@ pipeline {
 
         stage('Build Application') {
             steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        echo "======================================"
+                        echo "BUILD APPLICATION"
+                        echo "======================================"
 
-                nodejs(nodeJSInstallationName: 'NodeJS') {
+                        npm run build
 
-                    dir("${APP_DIR}") {
-
-                        sh '''
-                            echo '======================================'
-                            echo 'BUILD APPLICATION'
-                            echo '======================================'
-
-                            npm run build
-
-                            echo "Application build successful."
-                        '''
-                    }
+                        echo "Application build completed."
+                    '''
                 }
             }
         }
@@ -93,37 +132,62 @@ pipeline {
 
         stage('OWASP Dependency Check') {
             steps {
+                sh '''
+                    echo "======================================"
+                    echo "OWASP DEPENDENCY CHECK"
+                    echo "======================================"
 
+                    if command -v dependency-check.sh >/dev/null 2>&1; then
+
+                        dependency-check.sh \
+                            --project "Book-My-Show" \
+                            --scan "${APP_DIR}" \
+                            --format HTML \
+                            --out dependency-check-report \
+                            --failOnCVSS 11
+
+                    else
+                        echo "OWASP Dependency-Check is not installed."
+                        echo "Skipping this stage."
+                    fi
+
+                    echo "OWASP stage completed."
+                '''
+            }
+        }
+
+
+        stage('NVD Vulnerability Scan') {
+            steps {
                 withCredentials([
                     string(
-                        credentialsId: "${NVD_CREDENTIAL_ID}",
+                        credentialsId: "${NVD_CREDENTIALS}",
                         variable: 'NVD_API_KEY'
                     )
                 ]) {
-
                     sh '''
-                        echo '======================================'
-                        echo 'OWASP DEPENDENCY CHECK'
-                        echo '======================================'
+                        echo "======================================"
+                        echo "NVD VULNERABILITY SCAN"
+                        echo "======================================"
 
-                        if command -v dependency-check.sh >/dev/null 2>&1
-                        then
+                        if command -v dependency-check.sh >/dev/null 2>&1; then
 
-                            mkdir -p dependency-check-report
+                            echo "Running Dependency Check with NVD API key..."
 
                             dependency-check.sh \
                                 --project "Book-My-Show" \
-                                --scan "${WORKSPACE}/${APP_DIR}" \
+                                --scan "${APP_DIR}" \
                                 --format HTML \
-                                --out "${WORKSPACE}/dependency-check-report" \
-                                --nvdApiKey "${NVD_API_KEY}"
+                                --out nvd-report \
+                                --nvdApiKey "${NVD_API_KEY}" \
+                                --failOnCVSS 11
 
                         else
-
-                            echo "OWASP Dependency-Check is not installed."
-                            echo "Skipping OWASP scan."
-
+                            echo "dependency-check.sh not installed."
+                            echo "Skipping NVD scan."
                         fi
+
+                        echo "NVD stage completed."
                     '''
                 }
             }
@@ -132,27 +196,25 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
-
                 sh '''
-                    echo '======================================'
-                    echo 'TRIVY FILESYSTEM SCAN'
-                    echo '======================================'
+                    echo "======================================"
+                    echo "TRIVY FILESYSTEM SCAN"
+                    echo "======================================"
 
-                    if command -v trivy >/dev/null 2>&1
-                    then
+                    if command -v trivy >/dev/null 2>&1; then
 
                         trivy fs \
-                            --scanners vuln \
+                            --scanners vuln,secret \
                             --severity HIGH,CRITICAL \
                             --exit-code 0 \
                             "${APP_DIR}"
 
                     else
-
                         echo "Trivy is not installed."
-                        echo "Skipping Trivy scan."
-
+                        echo "Skipping Trivy filesystem scan."
                     fi
+
+                    echo "Trivy filesystem stage completed."
                 '''
             }
         }
@@ -160,20 +222,17 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-
                 sh '''
-                    echo '======================================'
-                    echo 'DOCKER BUILD'
-                    echo '======================================'
-
-                    docker --version
+                    echo "======================================"
+                    echo "DOCKER BUILD"
+                    echo "======================================"
 
                     docker build \
-                        -t "${IMAGE_NAME}:${BUILD_NUMBER}" \
+                        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
                         -t "${IMAGE_NAME}:latest" \
                         "${APP_DIR}"
 
-                    echo "Docker build successful."
+                    echo "Docker image created."
 
                     docker images | grep "${IMAGE_NAME}" || true
                 '''
@@ -183,49 +242,28 @@ pipeline {
 
         stage('Docker Login & Push') {
             steps {
-
                 withCredentials([
                     usernamePassword(
-                        credentialsId: "${DOCKER_CREDENTIAL_ID}",
+                        credentialsId: "${DOCKER_CREDENTIALS}",
                         usernameVariable: 'DOCKER_USERNAME',
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
                 ]) {
-
                     sh '''
-                        echo '======================================'
-                        echo 'DOCKER LOGIN'
-                        echo '======================================'
+                        echo "======================================"
+                        echo "DOCKER LOGIN & PUSH"
+                        echo "======================================"
 
                         echo "${DOCKER_PASSWORD}" | docker login \
-                            --username "${DOCKER_USERNAME}" \
+                            -u "${DOCKER_USERNAME}" \
                             --password-stdin
 
-                        echo '======================================'
-                        echo 'TAGGING IMAGE'
-                        echo '======================================'
-
-                        docker tag \
-                            "${IMAGE_NAME}:${BUILD_NUMBER}" \
-                            "${DOCKER_USERNAME}/${IMAGE_NAME}:${BUILD_NUMBER}"
-
-                        docker tag \
-                            "${IMAGE_NAME}:latest" \
-                            "${DOCKER_USERNAME}/${IMAGE_NAME}:latest"
-
-                        echo '======================================'
-                        echo 'PUSHING IMAGE'
-                        echo '======================================'
-
-                        docker push \
-                            "${DOCKER_USERNAME}/${IMAGE_NAME}:${BUILD_NUMBER}"
-
-                        docker push \
-                            "${DOCKER_USERNAME}/${IMAGE_NAME}:latest"
+                        docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+                        docker push "${IMAGE_NAME}:latest"
 
                         docker logout
 
-                        echo "Docker push successful."
+                        echo "Docker image pushed successfully."
                     '''
                 }
             }
@@ -234,22 +272,25 @@ pipeline {
 
         stage('Deploy Container') {
             steps {
-
                 sh '''
-                    echo '======================================'
-                    echo 'DEPLOY CONTAINER'
-                    echo '======================================'
+                    echo "======================================"
+                    echo "DEPLOY CONTAINER"
+                    echo "======================================"
 
                     docker rm -f bookmyshow-container 2>/dev/null || true
 
                     docker run -d \
                         --name bookmyshow-container \
                         -p 3000:3000 \
-                        "${IMAGE_NAME}:${BUILD_NUMBER}"
+                        "${IMAGE_NAME}:latest"
 
                     echo "Container started."
 
-                    docker ps | grep bookmyshow-container || true
+                    sleep 5
+
+                    docker ps --filter "name=bookmyshow-container"
+
+                    echo "Deployment completed."
                 '''
             }
         }
@@ -263,10 +304,8 @@ pipeline {
             echo '======================================'
             echo 'PIPELINE SUCCESS'
             echo '======================================'
-
             echo "Build Number : ${BUILD_NUMBER}"
             echo "Result       : SUCCESS"
-
             echo '======================================'
         }
 
@@ -274,10 +313,8 @@ pipeline {
             echo '======================================'
             echo 'PIPELINE FAILED'
             echo '======================================'
-
             echo "Build Number : ${BUILD_NUMBER}"
             echo "Result       : FAILURE"
-
             echo '======================================'
         }
 
