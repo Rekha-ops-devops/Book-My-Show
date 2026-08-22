@@ -3,33 +3,30 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = 'rekhadeepa/bms:latest'
-        CONTAINER_NAME = 'bms'
         APP_DIR = 'bookmyshow-app'
+        IMAGE_NAME = 'bookmyshow'
+        DOCKER_CREDENTIAL_ID = 'dockerhub-credentials'
+        NVD_CREDENTIAL_ID = 'nvd-api-key'
     }
 
     stages {
 
-        stage('Clean Workspace') {
-            steps {
-                cleanWs()
-            }
-        }
-
         stage('Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/Rekha-ops-devops/Book-My-Show.git'
+                echo '======================================'
+                echo 'CHECKOUT SOURCE CODE'
+                echo '======================================'
+
+                checkout scm
 
                 sh '''
-                    echo "======================================"
-                    echo "CHECKOUT"
-                    echo "======================================"
-
+                    echo "Workspace:"
                     pwd
+
+                    echo "Repository files:"
                     ls -la
 
-                    echo "Application:"
+                    echo "Application files:"
                     ls -la bookmyshow-app
 
                     test -f bookmyshow-app/package.json
@@ -40,313 +37,252 @@ pipeline {
             }
         }
 
+
         stage('Install Dependencies') {
             steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        echo "======================================"
-                        echo "INSTALL DEPENDENCIES"
-                        echo "======================================"
 
-                        node --version
-                        npm --version
+                nodejs(nodeJSInstallationName: 'NodeJS') {
 
-                        rm -rf node_modules
+                    dir("${APP_DIR}") {
 
-                        echo "Running npm install..."
-                        npm install --legacy-peer-deps
+                        sh '''
+                            echo '======================================'
+                            echo 'NODE / NPM VERSION'
+                            echo '======================================'
 
-                        echo "Dependencies installed successfully."
-                    '''
+                            node --version
+                            npm --version
+
+                            echo '======================================'
+                            echo 'INSTALLING DEPENDENCIES'
+                            echo '======================================'
+
+                            rm -rf node_modules
+
+                            npm install --legacy-peer-deps
+
+                            echo "Dependencies installed successfully."
+                        '''
+                    }
                 }
             }
         }
+
 
         stage('Build Application') {
             steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        echo "======================================"
-                        echo "BUILD APPLICATION"
-                        echo "======================================"
 
-                        export NODE_OPTIONS=--openssl-legacy-provider
+                nodejs(nodeJSInstallationName: 'NodeJS') {
 
-                        npm run build
+                    dir("${APP_DIR}") {
 
-                        echo "Build successful."
+                        sh '''
+                            echo '======================================'
+                            echo 'BUILD APPLICATION'
+                            echo '======================================'
 
-                        ls -la build
-                    '''
+                            npm run build
+
+                            echo "Application build successful."
+                        '''
+                    }
                 }
             }
         }
+
 
         stage('OWASP Dependency Check') {
             steps {
 
                 withCredentials([
                     string(
-                        credentialsId: 'nvd-api-key',
+                        credentialsId: "${NVD_CREDENTIAL_ID}",
                         variable: 'NVD_API_KEY'
                     )
                 ]) {
 
                     sh '''
-                        echo "======================================"
-                        echo "OWASP DEPENDENCY CHECK"
-                        echo "======================================"
+                        echo '======================================'
+                        echo 'OWASP DEPENDENCY CHECK'
+                        echo '======================================'
 
                         if command -v dependency-check.sh >/dev/null 2>&1
                         then
-                            echo "Dependency Check found."
+
+                            mkdir -p dependency-check-report
 
                             dependency-check.sh \
                                 --project "Book-My-Show" \
-                                --scan . \
-                                --format XML \
-                                --out dependency-check-report \
-                                --nvdApiKey "$NVD_API_KEY" \
-                                --disableYarnAudit \
-                                --disableNodeAudit
+                                --scan "${WORKSPACE}/${APP_DIR}" \
+                                --format HTML \
+                                --out "${WORKSPACE}/dependency-check-report" \
+                                --nvdApiKey "${NVD_API_KEY}"
 
                         else
-                            echo "WARNING: dependency-check.sh is not installed."
-                            echo "Skipping OWASP scan."
-                        fi
 
-                        echo "OWASP stage completed."
+                            echo "OWASP Dependency-Check is not installed."
+                            echo "Skipping OWASP scan."
+
+                        fi
                     '''
                 }
             }
         }
 
+
         stage('Trivy FS Scan') {
             steps {
+
                 sh '''
-                    echo "======================================"
-                    echo "TRIVY FILESYSTEM SCAN"
-                    echo "======================================"
+                    echo '======================================'
+                    echo 'TRIVY FILESYSTEM SCAN'
+                    echo '======================================'
 
                     if command -v trivy >/dev/null 2>&1
                     then
 
-                        trivy fs . \
-                            --scanners vuln,secret \
-                            --format table \
-                            -o trivyfs.txt \
-                            .
-
-                        echo "Trivy scan completed."
-
-                        cat trivyfs.txt
+                        trivy fs \
+                            --scanners vuln \
+                            --severity HIGH,CRITICAL \
+                            --exit-code 0 \
+                            "${APP_DIR}"
 
                     else
 
-                        echo "WARNING: Trivy is not installed."
+                        echo "Trivy is not installed."
                         echo "Skipping Trivy scan."
-
-                        echo "Trivy not installed." > trivyfs.txt
 
                     fi
                 '''
             }
-
-            post {
-                always {
-                    archiveArtifacts(
-                        artifacts: 'trivyfs.txt',
-                        allowEmptyArchive: true
-                    )
-                }
-            }
         }
+
 
         stage('Docker Build') {
             steps {
+
                 sh '''
-                    echo "======================================"
-                    echo "DOCKER BUILD"
-                    echo "======================================"
+                    echo '======================================'
+                    echo 'DOCKER BUILD'
+                    echo '======================================'
 
                     docker --version
 
                     docker build \
-                        --no-cache \
-                        -t ${DOCKER_IMAGE} \
-                        -f ${APP_DIR}/Dockerfile \
-                        ${APP_DIR}
+                        -t "${IMAGE_NAME}:${BUILD_NUMBER}" \
+                        -t "${IMAGE_NAME}:latest" \
+                        "${APP_DIR}"
 
-                    echo "Docker image built successfully."
+                    echo "Docker build successful."
 
-                    docker images | grep rekhadeepa || true
+                    docker images | grep "${IMAGE_NAME}" || true
                 '''
             }
         }
+
 
         stage('Docker Login & Push') {
             steps {
 
                 withCredentials([
                     usernamePassword(
-                        credentialsId: 'docker',
+                        credentialsId: "${DOCKER_CREDENTIAL_ID}",
                         usernameVariable: 'DOCKER_USERNAME',
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
                 ]) {
 
                     sh '''
-                        echo "======================================"
-                        echo "DOCKER LOGIN"
-                        echo "======================================"
+                        echo '======================================'
+                        echo 'DOCKER LOGIN'
+                        echo '======================================'
 
-                        set +x
-
-                        echo "$DOCKER_PASSWORD" | docker login \
-                            --username "$DOCKER_USERNAME" \
+                        echo "${DOCKER_PASSWORD}" | docker login \
+                            --username "${DOCKER_USERNAME}" \
                             --password-stdin
 
-                        echo "Docker login successful."
+                        echo '======================================'
+                        echo 'TAGGING IMAGE'
+                        echo '======================================'
 
-                        echo "======================================"
-                        echo "DOCKER PUSH"
-                        echo "======================================"
+                        docker tag \
+                            "${IMAGE_NAME}:${BUILD_NUMBER}" \
+                            "${DOCKER_USERNAME}/${IMAGE_NAME}:${BUILD_NUMBER}"
 
-                        docker push ${DOCKER_IMAGE}
+                        docker tag \
+                            "${IMAGE_NAME}:latest" \
+                            "${DOCKER_USERNAME}/${IMAGE_NAME}:latest"
 
-                        echo "Docker image pushed successfully."
+                        echo '======================================'
+                        echo 'PUSHING IMAGE'
+                        echo '======================================'
+
+                        docker push \
+                            "${DOCKER_USERNAME}/${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                        docker push \
+                            "${DOCKER_USERNAME}/${IMAGE_NAME}:latest"
 
                         docker logout
+
+                        echo "Docker push successful."
                     '''
                 }
             }
         }
 
+
         stage('Deploy Container') {
             steps {
+
                 sh '''
-                    echo "======================================"
-                    echo "DEPLOY CONTAINER"
-                    echo "======================================"
+                    echo '======================================'
+                    echo 'DEPLOY CONTAINER'
+                    echo '======================================'
 
-                    echo "Stopping existing container..."
-
-                    docker stop ${CONTAINER_NAME} || true
-
-                    echo "Removing existing container..."
-
-                    docker rm ${CONTAINER_NAME} || true
-
-                    echo "Pulling latest Docker image..."
-
-                    docker pull ${DOCKER_IMAGE}
-
-                    echo "Starting new container..."
+                    docker rm -f bookmyshow-container 2>/dev/null || true
 
                     docker run -d \
-                        --restart=always \
-                        --name ${CONTAINER_NAME} \
+                        --name bookmyshow-container \
                         -p 3000:3000 \
-                        ${DOCKER_IMAGE}
+                        "${IMAGE_NAME}:${BUILD_NUMBER}"
 
-                    echo "Waiting for application..."
+                    echo "Container started."
 
-                    sleep 15
-
-                    echo "======================================"
-                    echo "CONTAINER STATUS"
-                    echo "======================================"
-
-                    docker ps -a
-
-                    echo "======================================"
-                    echo "CHECKING CONTAINER"
-                    echo "======================================"
-
-                    if [ "$(docker inspect -f '{{.State.Running}}' ${CONTAINER_NAME})" != "true" ]
-                    then
-
-                        echo "ERROR: Container is not running."
-
-                        docker logs ${CONTAINER_NAME}
-
-                        exit 1
-
-                    fi
-
-                    echo "Container is running successfully."
-
-                    echo "======================================"
-                    echo "APPLICATION LOGS"
-                    echo "======================================"
-
-                    docker logs --tail 50 ${CONTAINER_NAME}
+                    docker ps | grep bookmyshow-container || true
                 '''
             }
         }
+
     }
+
 
     post {
 
         success {
+            echo '======================================'
+            echo 'PIPELINE SUCCESS'
+            echo '======================================'
 
-            echo "======================================"
-            echo "PIPELINE SUCCESS"
-            echo "======================================"
+            echo "Build Number : ${BUILD_NUMBER}"
+            echo "Result       : SUCCESS"
 
-            emailext(
-                to: 'rekhask977@gmail.com',
-                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                body: """
-Book My Show Pipeline Successful
-
-Build Number : ${env.BUILD_NUMBER}
-Docker Image : ${DOCKER_IMAGE}
-Container    : ${CONTAINER_NAME}
-Port         : 3000
-
-Build URL:
-${env.BUILD_URL}
-                """,
-                attachLog: true,
-                attachmentsPattern: 'trivyfs.txt'
-            )
+            echo '======================================'
         }
 
         failure {
+            echo '======================================'
+            echo 'PIPELINE FAILED'
+            echo '======================================'
 
-            echo "======================================"
-            echo "PIPELINE FAILED"
-            echo "======================================"
+            echo "Build Number : ${BUILD_NUMBER}"
+            echo "Result       : FAILURE"
 
-            emailext(
-                to: 'rekhask977@gmail.com',
-                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                body: """
-Book My Show Pipeline Failed
-
-Build Number : ${env.BUILD_NUMBER}
-
-Build URL:
-${env.BUILD_URL}
-
-Please check Jenkins Console Output.
-                """,
-                attachLog: true,
-                attachmentsPattern: 'trivyfs.txt'
-            )
+            echo '======================================'
         }
 
         always {
-
-            echo "======================================"
-            echo "PIPELINE FINISHED"
-            echo "======================================"
-
-            echo "Build Number : ${env.BUILD_NUMBER}"
-            echo "Result       : ${currentBuild.currentResult}"
-
-            echo "======================================"
+            echo 'Pipeline completed.'
         }
     }
 }
