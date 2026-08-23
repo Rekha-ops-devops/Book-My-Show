@@ -115,6 +115,12 @@ stage('Deploy to EKS Cluster') {
                 kubectl apply -f deployment.yml
                 kubectl apply -f service.yml
 
+                echo "Waiting for deployment..."
+                kubectl rollout status deployment/bms-app --timeout=5m
+
+                echo "Checking pods..."
+                kubectl get pods -o wide
+
                 echo "Verifying deployment..."
                 kubectl get pods
                 kubectl get svc
